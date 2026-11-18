@@ -2,7 +2,7 @@
 /* Otter — offline workout viewer and logger.
    All workouts, videos and logs live in this browser's IndexedDB on the phone.
    Nothing is sent anywhere. */
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 
 /* ---------------- IndexedDB ---------------- */
 const STORES = ['workouts', 'exercises', 'videos', 'logs', 'meta'];
