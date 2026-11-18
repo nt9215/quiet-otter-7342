@@ -2,7 +2,7 @@
 /* Otter — offline workout viewer and logger.
    All workouts, videos and logs live in this browser's IndexedDB on the phone.
    Nothing is sent anywhere. */
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.1.0';
 
 /* ---------------- IndexedDB ---------------- */
 const STORES = ['workouts', 'exercises', 'videos', 'logs', 'meta'];
@@ -206,6 +206,10 @@ function videoBlock(exId, label = 'Play demo video') {
   exId = String(exId);
   const e = S.ex[exId] || {};
   const ytId = e.yt && e.yt.id;
+  if (!S.videoKeys.has(exId) && e.ytSaved && ytId) {
+    wrap.innerHTML = `<a class="vidph" href="https://youtu.be/${esc(ytId)}" target="_blank" rel="noopener" style="text-decoration:none">▶ ${esc(label)} <span class="small muted">· in YouTube downloads</span></a>`;
+    return wrap;
+  }
   if (!S.videoKeys.has(exId)) {
     wrap.innerHTML = `<div class="vidph missing">🎬 Video not on this phone yet${ytId ? ` · <a href="https://youtu.be/${esc(ytId)}" target="_blank" rel="noopener" style="color:var(--link)">YouTube</a>` : ''}</div>`;
     return wrap;
@@ -231,7 +235,7 @@ function videoBlock(exId, label = 'Play demo video') {
 function missingVideos() {
   const need = new Set();
   S.workouts.forEach(w => allExerciseIds(w).forEach(id => need.add(id)));
-  return [...need].filter(id => !S.videoKeys.has(id) && S.ex[id] && S.ex[id].yt && S.ex[id].yt.id);
+  return [...need].filter(id => !S.videoKeys.has(id) && S.ex[id] && !S.ex[id].ytSaved && S.ex[id].yt && S.ex[id].yt.id);
 }
 
 /* ---------------- Logs ---------------- */
@@ -364,6 +368,7 @@ function renderWorkout(view, wid) {
     vidSlot.appendChild(videoBlock(itemVideoId(item, il)));
     card.appendChild(vidSlot);
 
+    if (il.src === 'tc') { const tcEl = document.createElement('div'); tcEl.className = 'last'; tcEl.style.color = 'var(--link)'; tcEl.textContent = 'From TrueCoach: ' + (il.tcText || ''); card.appendChild(tcEl); }
     const lastEl = document.createElement('div'); lastEl.className = 'last';
     card.appendChild(lastEl);
     let lastSets = [];
@@ -386,8 +391,8 @@ function renderWorkout(view, wid) {
         tr.innerHTML = `<td class="n">${si + 1}</td><td><input class="kg" inputmode="decimal" enterkeyhint="next" value="${esc(s.kg)}" aria-label="Set ${si + 1} kg"></td>
           <td><input class="rp" inputmode="decimal" enterkeyhint="done" value="${esc(s.reps)}" aria-label="Set ${si + 1} ${unit}"></td>
           <td style="width:54px"><button class="tick ${s.done ? 'on' : ''}" aria-label="Set ${si + 1} done">✓</button></td>`;
-        tr.querySelector('.kg').oninput = e => { s.kg = e.target.value.trim(); saveLog(log); };
-        tr.querySelector('.rp').oninput = e => { s.reps = e.target.value.trim(); saveLog(log); };
+        tr.querySelector('.kg').oninput = e => { s.kg = e.target.value.trim(); delete il.src; saveLog(log); };
+        tr.querySelector('.rp').oninput = e => { s.reps = e.target.value.trim(); delete il.src; saveLog(log); };
         tr.querySelector('.tick').onclick = e => {
           const ls = lastSets[si] || lastSets[lastSets.length - 1];
           if (!s.done && s.kg === '' && s.reps === '' && ls) { s.kg = ls.kg; s.reps = ls.reps; tr.querySelector('.kg').value = s.kg; tr.querySelector('.rp').value = s.reps; }
@@ -430,12 +435,13 @@ function renderWorkout(view, wid) {
   // Session note + finish
   const end = document.createElement('div'); end.className = 'card';
   end.innerHTML = `<b>Session note</b><textarea id="wnote" placeholder="Energy, sleep, anything to tell your coach"></textarea>
-    <div style="margin-top:12px">${log.finished ? `<p class="small muted">Finished ${esc(fmtStamp(log.finished))}</p><button class="btn block" id="unfinish">Mark as not finished</button>` : '<button class="btn primary block" id="finish">Finish workout ✓</button>'}</div>`;
+    <div style="margin-top:12px">${log.finished ? `<p class="small muted">Finished ${esc(fmtStamp(log.finished))}${log.src === 'tc' ? ' (in TrueCoach)' : ''}</p><button class="btn primary block" id="sendNow" style="margin-bottom:8px">Send log for TrueCoach</button><button class="btn block" id="unfinish">Mark as not finished</button>` : '<button class="btn primary block" id="finish">Finish workout ✓</button>'}</div>`;
   view.appendChild(end);
   const wn = $('#wnote', end); wn.value = log.note || ''; wn.oninput = () => { log.note = wn.value; saveLog(log); };
   const fin = $('#finish', end), unf = $('#unfinish', end);
-  if (fin) fin.onclick = async () => { log.finished = Date.now(); await saveLog(log, true); stopTimer(); toast('Workout saved 💪'); go('home', {}, true); };
+  if (fin) fin.onclick = async () => { log.finished = Date.now(); await saveLog(log, true); stopTimer(); toast(navigator.onLine ? 'Workout saved 💪 — tap Send log in Data so your trainer sees it' : 'Workout saved 💪 — send your log when you have signal', 4000); go('home', {}, true); };
   if (unf) unf.onclick = async () => { log.finished = null; await saveLog(log, true); render(current); };
+  const sn = $('#sendNow', end); if (sn) sn.onclick = sendLog;
 }
 let toastedFor = null;
 function toastOnce(w) { if (toastedFor !== w.id && !navigator.onLine) { toastedFor = w.id; toast('Saved on this phone — no signal needed'); } }
@@ -502,8 +508,9 @@ function logsCSV() {
 }
 async function shareFile(text, name, type) {
   const f = new File([text], name, { type });
-  if (navigator.canShare && navigator.canShare({ files: [f] })) { try { await navigator.share({ files: [f], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+  if (navigator.canShare && navigator.canShare({ files: [f] })) { try { await navigator.share({ files: [f], title: name }); return true; } catch (e) { if (e.name === 'AbortError') return false; } }
   downloadFile(text, name, type);
+  return true;
 }
 function downloadFile(data, name, type) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type })); a.download = name;
@@ -511,6 +518,13 @@ function downloadFile(data, name, type) {
 }
 
 /* ---------------- Data / import ---------------- */
+function unsentCount() { const t = S.meta.lastSent || 0; return Object.values(S.logs).filter(l => (l.updated || 0) > t && l.src !== 'tc').length; }
+async function sendLog() {
+  const stamp = new Date();
+  const name = `Otter Log ${todayISO()} ${pad(stamp.getHours())}${pad(stamp.getMinutes())}.json`;
+  const ok = await shareFile(JSON.stringify({ kind: 'gym-logs', version: 1, saved: stamp.toISOString(), logs: S.logs }), name, 'application/json');
+  if (ok !== false) { await idbPut('meta', 'lastSent', Date.now()); S.meta.lastSent = Date.now(); if (current.v === 'data') render(current); }
+}
 async function renderData(view) {
   setChrome('Data', false, 'data');
   const vk = S.videoKeys.size, miss = missingVideos();
@@ -529,12 +543,13 @@ async function renderData(view) {
       <dt>Protected</dt><dd>${persisted ? 'Yes ✓' : `No <button class="btn small" id="persist" style="margin-left:6px">Protect</button>`}</dd>
       <dt>App version</dt><dd>${APP_VERSION}</dd></dl>
       ${miss.length ? `<details style="margin-top:10px"><summary class="small">Missing videos</summary><ul class="small muted">${miss.map(id => `<li>${esc(exName(id))}</li>`).join('')}</ul></details>` : ''}</div>
-    <div class="card"><b>Back up your logs</b><p class="small muted">Your sets and notes are only on this phone. Save a backup now and then (e.g. to Google Drive).</p>
-      <div class="row" style="flex-wrap:wrap"><button class="btn" id="bk">Save backup</button><button class="btn" id="rs">Restore backup</button></div></div>
+    <div class="card"><b>Send your log to TrueCoach</b><p class="small muted">When you have signal, tap <b>Send log</b> and save it to the <b>Otter</b> folder in Google Drive. Claude copies it into TrueCoach for your trainer on the next check (Mon, Wed, Fri). It also works as a backup.</p>
+      <p class="small">${unsentCount() ? `<span style="color:var(--warn)">${unsentCount()} workout${unsentCount() > 1 ? 's' : ''} changed since you last sent</span>` : 'Everything has been sent ✓'}${S.meta.lastSent ? ` <span class="muted">· last sent ${esc(fmtStamp(S.meta.lastSent))}</span>` : ''}</p>
+      <div class="row" style="flex-wrap:wrap"><button class="btn primary" id="bk">Send log</button><button class="btn" id="rs">Restore from a log file</button></div></div>
     <div class="card"><b>Reset</b><p class="small muted">Removes workouts, videos and logs from this phone.</p><button class="btn danger" id="wipe">Delete everything…</button></div>`;
   $('#imp').onclick = () => { fileMode = 'import'; $('#fileIn').value = ''; $('#fileIn').click(); };
   $('#rs').onclick = () => { fileMode = 'import'; $('#fileIn').value = ''; $('#fileIn').click(); };
-  $('#bk').onclick = () => shareFile(JSON.stringify({ kind: 'gym-logs', version: 1, saved: new Date().toISOString(), logs: S.logs }), `Workout Log Backup ${todayISO()}.json`, 'application/json');
+  $('#bk').onclick = sendLog;
   const ps = $('#persist'); if (ps) ps.onclick = async () => { const ok = await navigator.storage.persist().catch(() => false); toast(ok ? 'Storage protected' : 'Chrome said no — install the app to your home screen first'); render(current); };
   const wipe = $('#wipe');
   wipe.onclick = async () => {
@@ -578,6 +593,7 @@ async function importFiles(files) {
   await loadState();
   if (current.v === 'data') await render(current);
   const parts = [];
+  if (mergedFromTC) parts.push(`${mergedFromTC} results from TrueCoach`);
   if (added.w) parts.push(`${added.w} workouts`); if (added.v) parts.push(`${added.v} videos`); if (added.logs) parts.push(`${added.logs} logged sessions`);
   setStatus((parts.length ? 'Imported ' + parts.join(', ') + '.' : 'Nothing imported.') + (errors.length ? ' Problems: ' + errors.join('; ') : ''), null);
   toast(errors.length ? 'Import finished with problems' : 'Import complete ✓');
@@ -587,8 +603,55 @@ async function importData(obj) {
   await idbWrite('workouts', st => ws.forEach(w => st.put(w, String(w.id))));
   const ex = obj.exercises || {};
   await idbWrite('exercises', st => Object.entries(ex).forEach(([k, v]) => st.put(v, String(k))));
+  Object.assign(S.ex, ex);
   if (obj.coach) await idbPut('meta', 'coach', obj.coach);
+  for (const id of obj.removeVideos || []) await idbDel('videos', String(id));
+  mergedFromTC = await mergeTrueCoach(ws);
   return ws.length;
+}
+/* Results typed into TrueCoach (when there was signal) come in with each workout file.
+   They fill exercises Otter has nothing for; Otter's own entries are never overwritten. */
+let mergedFromTC = 0;
+function parseResult(text, item) {
+  let t = String(text || '').trim(), choice = null;
+  const m = /^([^:\n]{3,60}):\s*/.exec(t);
+  if (m && item.alts && item.alts.length > 1) {
+    const hit = item.alts.find(a => norm(exName(a)) === norm(m[1]));
+    if (hit) { choice = String(hit); t = t.slice(m[0].length); }
+  }
+  const [body, ...noteParts] = t.split(/\s+[—–-]\s+/);
+  const sets = [];
+  for (const tok of body.split(/[,;\n]+/)) {
+    const a = /^\s*(\d+(?:\.\d+)?)\s*(?:kg|kgs)?\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:s|secs?|reps?)?\s*$/i.exec(tok);
+    const b = /^\s*(\d+(?:\.\d+)?)\s*(kg|kgs|s|secs?|reps?)\s*$/i.exec(tok);
+    if (a) sets.push({ kg: a[1], reps: a[2], done: true });
+    else if (b) sets.push(/kg/i.test(b[2]) ? { kg: b[1], reps: '', done: true } : { kg: '', reps: b[1], done: true });
+    else if (tok.trim()) { sets.length = 0; break; }
+  }
+  return sets.length ? { sets, note: noteParts.join(' — '), choice } : { sets: [], note: String(text).trim(), choice };
+}
+async function mergeTrueCoach(ws) {
+  let n = 0;
+  for (const w of ws) {
+    const wid = String(w.id);
+    const hasTC = (w.items || []).some(i => (i.tc_result || '').trim()) || w.tc_state === 'completed';
+    if (!hasTC) continue;
+    const log = S.logs[wid] ? JSON.parse(JSON.stringify(S.logs[wid])) : { wid, items: {}, note: '', started: null, finished: null, updated: null };
+    let changed = false;
+    for (const it of w.items || []) {
+      const txt = (it.tc_result || '').trim(); if (!txt) continue;
+      const cur = log.items[String(it.id)];
+      if (cur && cur.src !== 'tc' && hasAnyData(cur)) continue;
+      const r = parseResult(txt, it);
+      const { n: nSets } = parseSets(it.info);
+      const sets = r.sets.length ? r.sets : Array.from({ length: nSets }, () => ({ kg: '', reps: '', done: false }));
+      log.items[String(it.id)] = { sets, note: r.note, choice: r.choice || (it.alts && it.alts.length > 1 ? String(it.alts[0]) : null), src: 'tc', tcText: txt };
+      changed = true; n++;
+    }
+    if (w.tc_state === 'completed' && !log.finished) { log.finished = Date.parse(w.updated_at || '') || Date.now(); log.src = log.src || 'tc'; changed = true; }
+    if (changed) { log.updated = log.updated || Date.now(); await idbPut('logs', wid, log); }
+  }
+  return n;
 }
 async function importBundle(f) {
   const hb = await f.slice(8, 12).arrayBuffer();
@@ -596,6 +659,7 @@ async function importBundle(f) {
   const hdr = JSON.parse(await f.slice(12, 12 + len).text());
   const base = 12 + len;
   setStatus('Importing workouts…', 0);
+  for (const id of hdr.removeVideos || []) await idbDel('videos', String(id));
   const w = await importData(hdr);
   const vids = hdr.videos || [];
   let v = 0;

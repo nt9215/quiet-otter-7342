@@ -1,6 +1,6 @@
 /* Service worker: keeps the app itself available with no signal.
    Workouts, videos and logs are in IndexedDB, not in this cache. */
-const CACHE = 'otter-v1.0.1';
+const CACHE = 'otter-v1.1.0';
 const FILES = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'];
 
 self.addEventListener('install', e => {
